@@ -16,11 +16,17 @@
 
 # imports
 ##@@20251103-New Decoder
-from src.services.packet_parser import parse_packets
+## Original One
+##from src.services.packet_parser import parse_packets
+## New One
 from src.services.BETR_packet_parser import parse_packets, BETRPacket
+## Original One
+##from src.services.trace_processor import process_te_inst
+## New One
+from src.services.BETR_trace_processor import process_te_inst
 ##@@20251103-New Decoder
 
-from src.services.trace_processor import process_te_inst
+
 from src.services.elf_disassembler import get_instruction_map
 
 from src.domain import *

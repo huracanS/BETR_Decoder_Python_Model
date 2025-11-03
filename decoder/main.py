@@ -48,11 +48,11 @@ if not path.exists(compiled_path):
 ##@@ 20251103-New Decider
 ##Original One.
 ##if not packets_path.endswith(".bin"):
-if not packets_path.endswith(".bin" or packets_path.endswith(".txt")):
+if not (packets_path.endswith(".bin") or packets_path.endswith(".txt")):
 ##@@ 20251103-New Decider
     print(f"Error: the file {packets_path} must be a binary file.")
     sys.exit(1)
-if not compiled_path.endswith(".riscv"):
+if not (compiled_path.endswith(".riscv") or compiled_path.endswith(".elf")):
     print(f"Error: the file {compiled_path} must be RISC-V compiled file.")
     sys.exit(1)
 

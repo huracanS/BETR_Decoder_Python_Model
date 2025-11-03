@@ -11,7 +11,7 @@ class BETRPacket:
     
     def __str__(self):
         return (f"BETRPacket(branch_addr=0x{self.branch_addr:08X}, "
-                f"inst_cnt={self.inst_cnt}, br_tkn=0x{self.br_tkn:08X}, "
+                f"inst_cnt={self.inst_cnt}, br_tkn=0x{self.br_tkn:32b}, "
                 f"extend={self.extend})")
 
 
