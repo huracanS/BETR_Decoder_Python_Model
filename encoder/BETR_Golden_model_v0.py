@@ -5,7 +5,7 @@ class RVFI_Instr:
     """
     RVFI interface input instruction class
     """
-    def __init__(self, pc, inst_op, insn, valid,
+    def __init__(self, pc, inst_op, valid,
                  is_compressed, is_branch, is_taken, ex_valid):
         self.valid = valid                   # 指令有效信号
         self.pc = pc                         # 指令地址
@@ -52,8 +52,20 @@ class TraceSignalWriter:
             # trace_valid 保留 1 位，trace_data 输出固定 19 位十六进制
             f.write(f"{trace_valid} {trace_data:019X}\n")
 
-            
+
 ##@@-- 20251103-Add File system
+
+
+    # InDirect Jump
+    JALR = 0x19
+
+    # Branch
+    EQ   = 0x17
+    NE   = 0x18
+    LTS  = 0x13
+    GES  = 0x15
+    LTU  = 0x14
+    GEU  = 0x16
 
 ## ===============================
 ## Output Interface Class  
@@ -247,22 +259,11 @@ def classify_instr(instr: RVFI_Instr):
     """
     Instruction classification:
     - NORMAL       : Normal instruction
-    - BR_TKN       : Conditional branch taken  
+    - BR_TAKEN       : Conditional branch taken  
     - BR_NOT_TKN   : Conditional branch not taken
     - INDIRECT     : Indirect jump (JALR)
     - TRAP         : Interrupt/exception
     """
-
-    # InDirect Jump
-    JALR = 0x19
-
-    # Branch
-    EQ   = 0x17
-    NE   = 0x18
-    LTS  = 0x13
-    GES  = 0x15
-    LTU  = 0x14
-    GEU  = 0x16
 
     # Trap / exception
     if instr.ex_valid:
@@ -276,9 +277,9 @@ def classify_instr(instr: RVFI_Instr):
     branch_ops = {'EQ', 'NE', 'LTS', 'GES', 'LTU', 'GEU'}
     if instr.inst_op in branch_ops:
         if instr.is_taken:
-            return 'BR_TKN'
+            return 'BR_TAKEN'
         else:
-            return 'BR_NOT_TKN'
+            return 'BR_NOT_TAKEN'
 
     # Default normal instruction
     return 'NORMAL'
@@ -408,7 +409,7 @@ class BETR_Encoder:
             return True, 'inst_cnt_max'
         if self.br_tkn & 0x80000000:
             return True, 'br_tkn_full'
-        if instr.trap:
+        if instr.ex_valid == 1:
             return True, 'trap'
         if instr_type == 'INDIRECT':
             return True, 'indirect'
@@ -466,205 +467,230 @@ class BETR_Encoder:
         self.trace_out.irq = 0
         print("\033[36m BETR Encoder completely reset\033[0m")
 
-def gen_instr_stream(normal_len=4, branch_tk_len=2, trap_len=1, indirect_len=1, start_pc=0x1000):
-    """
-    Automatically generate test instruction stream
-    """
+def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, start_pc=0x00001000):
     instr_stream = []
     pc = start_pc
 
     # Block 1: Normal instructions
     for _ in range(normal_len):
-        instr_stream.append(RVFI_Instr(pc=pc, next_pc=pc+4, insn=0x00000013, valid=True))
+        instr_stream.append(RVFI_Instr(
+            pc=pc,
+            inst_op=0x00,       # 普通指令
+            valid=True,
+            is_compressed=False,
+            is_branch=False,
+            is_taken=False,
+            ex_valid=False
+        ))
         pc += 4
 
-    # Block 2: Conditional branches (some taken, some not)
-    for i in range(branch_tk_len):
-        next_pc = pc + 8 if i % 2 == 0 else pc + 4
-        instr_stream.append(RVFI_Instr(pc=pc, next_pc=next_pc, insn=0x00000063, valid=True))
-        pc = next_pc
+    # Block 2: Branch instructions
+    branch_ops = ['EQ', 'NE', 'LTS', 'GES', 'LTU', 'GEU']
+    for i in range(branch_len):
+        op = branch_ops[i % len(branch_ops)]
+        taken = (i % 2 == 0)
+        instr_stream.append(RVFI_Instr(
+            pc=pc,
+            inst_op=op,
+            valid=True,
+            is_compressed=False,
+            is_branch=True,
+            is_taken=taken,
+            ex_valid=False
+        ))
+        pc += 4
 
-    # Block 3: TRAP instructions
+    # Block 3: Trap instructions
     for _ in range(trap_len):
-        instr_stream.append(RVFI_Instr(pc=pc, next_pc=pc+4, insn=0x00000093, valid=True, trap=True))
+        instr_stream.append(RVFI_Instr(
+            pc=pc,
+            inst_op=0x00,  # 任意操作码
+            insn=0x00000093,
+            valid=True,
+            is_compressed=False,
+            is_branch=False,
+            is_taken=False,
+            ex_valid=True
+        ))
         pc += 4
 
     # Block 4: Indirect jumps
     for _ in range(indirect_len):
-        instr_stream.append(RVFI_Instr(pc=pc, next_pc=pc+4, insn=0x00000667, valid=True))
+        instr_stream.append(RVFI_Instr(
+            pc=pc,
+            inst_op='JALR',
+            valid=True,
+            is_compressed=False,
+            is_branch=True,
+            is_taken=True,
+            ex_valid=False
+        ))
         pc += 4
 
     return instr_stream
 
 
-# ## ===============================
-# ## Test Functions
-# ## ===============================
+#####
+## ===============================
+## Test Functions for New BETR Encoder Interface
+## ===============================
+def test_basic_functionality():
+    """测试基本功能：正常指令处理和数据包生成"""
+    print("\nTesting Basic Functionality")
+    betr = BETR_Encoder(sram_max_len=4, trace_filename="test_basic_trace.txt")
+    
+    # 生成简单的指令流
+    instr_stream = gen_instr_stream(normal_len=5, branch_len=2, trap_len=0, indirect_len=1)
+    
+    betr.set_enable(True)
+    
+    for i, instr in enumerate(instr_stream):
+        print(f"Processing instruction {i+1}: PC=0x{instr.pc:08X}")
+        betr.process_instr(instr)
+    
+    stats = betr.get_stats()
+    print(f"Basic test completed: {stats['sram_packets']} packets generated")
+    return betr
 
-# def test_basic_functionality():
-#     """测试基本功能：正常指令处理和数据包生成"""
-#     print("🧪 Testing Basic Functionality")
-#     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_basic_trace.txt")
+def test_stop_address_feature():
+    """测试停止地址功能"""
+    print("\n🧪 Testing Stop Address Feature")
+    betr = BETR_Encoder(sram_max_len=4, trace_filename="test_stop_address_trace.txt")
     
-#     # 生成简单的指令流
-#     instr_stream = gen_instr_stream(normal_len=5, branch_tk_len=2, trap_len=0, indirect_len=1)
+    # 设置停止地址在中间位置
+    stop_pc = 0x100C
+    betr.set_stop_address(stop_pc, enable=True)
+    betr.set_enable(True)
     
-#     betr.set_enable(True)
+    instr_stream = gen_instr_stream(normal_len=10, branch_len=0, trap_len=0, indirect_len=0)
     
-#     for i, instr in enumerate(instr_stream):
-#         print(f"Processing instruction {i+1}: PC=0x{instr.pc:08X}")
-#         betr.process_instr(instr)
+    irq_triggered = False
+    for i, instr in enumerate(instr_stream):
+        betr.process_instr(instr)
+        if betr.irq_ctrl_reg.is_irq_active():
+            print(f"Stop address IRQ triggered at PC=0x{instr.pc:08X}")
+            irq_triggered = True
+            break
     
-#     stats = betr.get_stats()
-#     print(f"✅ Basic test completed: {stats['sram_packets']} packets generated")
-#     return betr
+    if not irq_triggered:
+        print("Stop address IRQ was not triggered")
+    
+    return betr
 
-# def test_stop_address_feature():
-#     """测试停止地址功能"""
-#     print("\n🧪 Testing Stop Address Feature")
-#     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_stop_address_trace.txt")
+def test_sram_full_condition():
+    """测试SRAM满条件"""
+    print("\nTesting SRAM Full Condition")
+    betr = BETR_Encoder(sram_max_len=2, trace_filename="test_sram_full_trace.txt")
+    betr.set_enable(True)
     
-#     # 设置停止地址在中间位置
-#     stop_pc = 0x100C
-#     betr.set_stop_address(stop_pc, enable=True)
-#     betr.set_enable(True)
+    instr_stream = gen_instr_stream(normal_len=2, branch_len=10, trap_len=0, indirect_len=0)
     
-#     instr_stream = gen_instr_stream(normal_len=10, branch_tk_len=0, trap_len=0, indirect_len=0)
+    for i, instr in enumerate(instr_stream[:8]):
+        betr.process_instr(instr)
+        if betr.irq_ctrl_reg.is_irq_active():
+            print(f"SRAM full IRQ triggered after {i+1} instructions")
+            break
     
-#     irq_triggered = False
-#     for i, instr in enumerate(instr_stream):
-#         betr.process_instr(instr)
-#         if betr.irq_ctrl_reg.is_irq_active():
-#             print(f"✅ Stop address IRQ triggered at PC=0x{instr.pc:08X}")
-#             irq_triggered = True
-#             break
-    
-#     if not irq_triggered:
-#         print("❌ Stop address IRQ was not triggered")
-    
-#     return betr
+    return betr
 
-# def test_sram_full_condition():
-#     """测试SRAM满条件"""
-#     print("\n🧪 Testing SRAM Full Condition")
-#     # 使用很小的SRAM来快速触发满条件
-#     betr = BETR_Encoder(sram_max_len=2, trace_filename="test_sram_full_trace.txt")
+def test_encoder_enable_disable():
+    """测试编码器启用/禁用功能"""
+    print("\nTesting Encoder Enable/Disable")
+    betr = BETR_Encoder(sram_max_len=4, trace_filename="test_enable_disable_trace.txt")
     
-#     betr.set_enable(True)
+    instr_stream = gen_instr_stream(normal_len=10, branch_len=2, trap_len=0, indirect_len=0)
     
-#     # 生成足够多的分支指令来触发多个数据包
-#     instr_stream = gen_instr_stream(normal_len=2, branch_tk_len=10, trap_len=0, indirect_len=0)
+    # 阶段1: 禁用状态
+    print("Phase 1: Encoder Disabled")
+    betr.set_enable(False)
+    for i in range(3):
+        betr.process_instr(instr_stream[i])
     
-#     for i, instr in enumerate(instr_stream[:8]):  # 只处理前8条
-#         betr.process_instr(instr)
-#         if betr.irq_ctrl_reg.is_irq_active():
-#             print(f"✅ SRAM full IRQ triggered after {i+1} instructions")
-#             break
+    # 阶段2: 启用状态
+    print("Phase 2: Encoder Enabled")
+    betr.set_enable(True)
+    for i in range(3, 6):
+        betr.process_instr(instr_stream[i])
     
-#     return betr
+    # 阶段3: 再次禁用
+    print("Phase 3: Encoder Disabled Again")
+    betr.set_enable(False)
+    for i in range(6, 8):
+        betr.process_instr(instr_stream[i])
+    
+    stats = betr.get_stats()
+    print(f"Enable/disable test completed: {stats['total_missed']} instructions missed")
+    return betr
 
-# def test_encoder_enable_disable():
-#     """测试编码器启用/禁用功能"""
-#     print("\n🧪 Testing Encoder Enable/Disable")
-#     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_enable_disable_trace.txt")
+def test_comprehensive_scenario():
+    """测试综合场景"""
+    print("\nTesting Comprehensive Scenario")
+    betr = BETR_Encoder(sram_max_len=4, trace_filename="test_comprehensive_trace.txt")
     
-#     instr_stream = gen_instr_stream(normal_len=10, branch_tk_len=2, trap_len=0, indirect_len=0)
+    betr.set_stop_address(0x1018, enable=True)
+    instr_stream = gen_instr_stream(normal_len=8, branch_len=4, trap_len=1, indirect_len=2)
     
-#     # 阶段1: 禁用状态
-#     print("Phase 1: Encoder Disabled")
-#     betr.set_enable(False)
-#     for i in range(3):
-#         betr.process_instr(instr_stream[i])
+    print("Starting comprehensive test...")
+    betr.set_enable(True)
     
-#     # 阶段2: 启用状态
-#     print("Phase 2: Encoder Enabled")
-#     betr.set_enable(True)
-#     for i in range(3, 6):
-#         betr.process_instr(instr_stream[i])
-    
-#     # 阶段3: 再次禁用
-#     print("Phase 3: Encoder Disabled Again")
-#     betr.set_enable(False)
-#     for i in range(6, 8):
-#         betr.process_instr(instr_stream[i])
-    
-#     stats = betr.get_stats()
-#     print(f"✅ Enable/disable test completed: {stats['total_missed']} instructions missed")
-#     return betr
-
-# def test_comprehensive_scenario():
-#     """测试综合场景"""
-#     print("\n🧪 Testing Comprehensive Scenario")
-#     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_comprehensive_trace.txt")
-    
-#     # 设置停止地址
-#     betr.set_stop_address(0x1018, enable=True)
-    
-#     instr_stream = gen_instr_stream(normal_len=8, branch_tk_len=4, trap_len=1, indirect_len=2)
-    
-#     print("Starting comprehensive test...")
-#     betr.set_enable(True)
-    
-#     for i, instr in enumerate(instr_stream):
-#         print(f"Instruction {i+1}: PC=0x{instr.pc:08X}")
-#         betr.process_instr(instr)
+    for i, instr in enumerate(instr_stream):
+        print(f"Instruction {i+1}: PC=0x{instr.pc:08X}")
+        betr.process_instr(instr)
         
-#         # 检查是否触发停止地址IRQ
-#         if betr.irq_ctrl_reg.is_irq_active():
-#             print("🛑 Stop address hit - clearing IRQ")
-#             betr.clear_irq()
-#             break
+        if betr.irq_ctrl_reg.is_irq_active():
+            print("Stop address hit - clearing IRQ")
+            betr.clear_irq()
+            break
     
-#     return betr
+    return betr
 
-# def run_all_tests():
-#     """运行所有测试"""
-#     print("=" * 70)
-#     print("BETR Encoder Test Suite")
-#     print("=" * 70)
+def run_all_tests():
+    """运行所有测试"""
+    print("\n" + "=" * 70)
+    print("BETR Encoder Test Suite")
+    print("=" * 70)
     
-#     test_results = []
+    test_results = []
+    test_functions = [
+        test_basic_functionality,
+        test_stop_address_feature, 
+        test_sram_full_condition,
+        test_encoder_enable_disable,
+        test_comprehensive_scenario
+    ]
     
-#     # 运行各个测试
-#     test_functions = [
-#         test_basic_functionality,
-#         test_stop_address_feature, 
-#         test_sram_full_condition,
-#         test_encoder_enable_disable,
-#         test_comprehensive_scenario
-#     ]
+    for test_func in test_functions:
+        try:
+            encoder = test_func()
+            stats = encoder.get_stats()
+            test_results.append({
+                'test': test_func.__name__,
+                'packets': stats['sram_packets'],
+                'missed': stats['total_missed'],
+                'status': 'PASS'
+            })
+        except Exception as e:
+            test_results.append({
+                'test': test_func.__name__, 
+                'packets': 0,
+                'missed': 0,
+                'status': f'FAIL: {e}'
+            })
     
-#     for test_func in test_functions:
-#         try:
-#             encoder = test_func()
-#             stats = encoder.get_stats()
-#             test_results.append({
-#                 'test': test_func.__name__,
-#                 'packets': stats['sram_packets'],
-#                 'missed': stats['total_missed'],
-#                 'status': 'PASS'
-#             })
-#         except Exception as e:
-#             test_results.append({
-#                 'test': test_func.__name__, 
-#                 'packets': 0,
-#                 'missed': 0,
-#                 'status': f'FAIL: {e}'
-#             })
+    print("\n" + "=" * 70)
+    print("Test Summary")
+    print("=" * 70)
+    for result in test_results:
+        status_icon = "【STATUS】" if result['status'] == 'PASS' else "❌"
+        print(f"{status_icon} {result['test']}: {result['status']}")
+        print(f"   Packets: {result['packets']}, Missed: {result['missed']}")
     
-#     # 打印测试总结
-#     print("\n" + "=" * 70)
-#     print("Test Summary")
-#     print("=" * 70)
-#     for result in test_results:
-#         status_icon = "✅" if result['status'] == 'PASS' else "❌"
-#         print(f"{status_icon} {result['test']}: {result['status']}")
-#         print(f"   Packets: {result['packets']}, Missed: {result['missed']}")
-    
-#     print(f"\nTotal tests: {len(test_results)}")
-#     passed = sum(1 for r in test_results if r['status'] == 'PASS')
-#     print(f"Passed: {passed}, Failed: {len(test_results) - passed}")
+    total = len(test_results)
+    passed = sum(1 for r in test_results if r['status'] == 'PASS')
+    print(f"\nTotal tests: {total}, Passed: {passed}, Failed: {total - passed}")
 
+
+#####
 
 ## ===============================
 ## Example Usage
@@ -674,8 +700,8 @@ if __name__ == "__main__":
     # run_all_tests()
     
     # 方式2: 运行单个测试
-    # test_basic_functionality()
+    test_basic_functionality()
     # test_stop_address_feature()
-    print(f"\nTEST.")
+    print(f"\nTEST Finished.")
     # 方式3: 原有的演示代码（如果需要保留）
     # run_original_demo()
