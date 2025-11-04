@@ -821,4 +821,4 @@ if __name__ == "__main__":
     encoder = BETR_Encoder()
     encoder.set_enable(True)
 
-    encoder.import_and_process_log("your_trace_data.log")
+    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
