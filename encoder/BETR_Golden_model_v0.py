@@ -35,6 +35,88 @@ class Trace_Pkg:
         """
         return (self.Branch_addr << (10 + 32 + 1)) | (self.inst_cnt << (32 + 1)) | (self.Br_tkn << 1) | self.extend
 
+## ===============================
+## Log File Import Function
+## ===============================
+
+class LogFileImporter:
+    """.log文件导入器"""
+    
+    def __init__(self):
+        self.imported_data = []
+    
+    def import_log_file(self, filename):
+        """
+        导入.log文件并转换为RVFI指令
+        
+        支持格式:
+        valid:1,PC:0x00010000,Inst:0x00,is_branch:0,is_taken:0,is_compressed:0,ex_valid:0
+        """
+        self.imported_data = []
+        
+        try:
+            with open(filename, 'r') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("Cycle"):
+                        continue
+                    
+                    # 解析数据
+                    instr = self._parse_log_line(line, line_num)
+                    if instr:
+                        self.imported_data.append(instr)
+            
+            print(f"成功导入 {len(self.imported_data)} 条指令来自 {filename}")
+            return self.imported_data
+            
+        except FileNotFoundError:
+            print(f"【ERROR】文件未找到: {filename}")
+            return []
+        except Exception as e:
+            print(f"【ERROR】导入文件时出错: {e}")
+            return []
+    
+    def _parse_log_line(self, line, line_num):
+        """解析单行日志数据"""
+        try:
+            data = {}
+            pairs = line.split(',')
+            
+            for pair in pairs:
+                if ':' in pair:
+                    key, value = pair.split(':', 1)
+                    data[key.strip()] = value.strip()
+            
+            # 检查必需字段
+            if 'valid' not in data or data['valid'] != '1':
+                return None
+            
+            # 创建RVFI指令对象
+            instr = RVFI_Instr(
+                pc=int(data['PC'], 16) & 0xFFFFFFFF,           # 32位PC
+                inst_op=int(data.get('Inst', '0'), 16) & 0xFF, # 8位操作码
+                valid=True,
+                is_compressed=data.get('is_compressed') == '1',
+                is_branch=data.get('is_branch') == '1',
+                is_taken=data.get('is_taken') == '1',
+                ex_valid=data.get('ex_valid') == '1'
+            )
+            
+            return instr
+            
+        except Exception as e:
+            print(f"⚠️ 第 {line_num} 行解析失败: {line} - {e}")
+            return None
+    
+    def get_imported_data(self):
+        """获取导入的数据"""
+        return self.imported_data
+    
+    def clear_data(self):
+        """清空导入的数据"""
+        self.imported_data = []
+        print("已清空导入数据")
+
 ##@@-- 20251103-Add File system
 ## ===============================
 ## Trace Signal File Output (新增部分)
@@ -467,6 +549,34 @@ class BETR_Encoder:
         self.trace_out.irq = 0
         print("\033[36m BETR Encoder completely reset\033[0m")
 
+    def import_and_process_log(self, log_filename):
+        """
+        导入.log文件并立即处理
+        
+        Args:
+            log_filename: .log文件路径
+        """
+        importer = LogFileImporter()
+        instructions = importer.import_log_file(log_filename)
+        
+        if not instructions:
+            print("❌ 没有可处理的指令")
+            return
+        
+        print(f"🚀 开始处理 {len(instructions)} 条指令...")
+        
+        # 处理所有导入的指令
+        for i, instr in enumerate(instructions):
+            print(f"处理指令 {i+1}/{len(instructions)}: PC=0x{instr.pc:08X}")
+            self.process_instr(instr)
+        
+        # 输出统计信息
+        stats = self.get_stats()
+        print(f"\n✅ 处理完成")
+        print(f"   - 生成数据包: {stats['sram_packets']}")
+        print(f"   - 丢失指令: {stats['total_missed']}")
+        print(f"   - 压缩率: {stats['sram_packets']/len(instructions):.2%}")    
+
 def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, start_pc=0x00001000):
     instr_stream = []
     pc = start_pc
@@ -700,8 +810,15 @@ if __name__ == "__main__":
     # run_all_tests()
     
     # 方式2: 运行单个测试
-    test_basic_functionality()
+    #test_basic_functionality()
     # test_stop_address_feature()
     print(f"\nTEST Finished.")
+    
     # 方式3: 原有的演示代码（如果需要保留）
     # run_original_demo()
+
+    # 4
+    encoder = BETR_Encoder()
+    encoder.set_enable(True)
+
+    encoder.import_and_process_log("your_trace_data.log")
