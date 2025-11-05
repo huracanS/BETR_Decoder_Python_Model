@@ -102,6 +102,11 @@ class LogFileImporter:
                 ex_valid=data.get('ex_valid') == '1'
             )
             
+            # 添加打印命令
+            print(f"RVFI指令信息: PC=0x{instr.pc:08X}, 操作码=0x{instr.inst_op:02X}, "
+                f"压缩={instr.is_compressed}, 分支={instr.is_branch}, "
+                f"分支跳转={instr.is_taken}, 是否异常中断={instr.ex_valid}")
+
             return instr
             
         except Exception as e:
@@ -372,7 +377,7 @@ def classify_instr(instr: RVFI_Instr):
 ## BETR Encoder Main Program
 ## ===============================
 class BETR_Encoder:
-    def __init__(self, sram_max_len=16,trace_filename = None):
+    def __init__(self, sram_max_len=1024,trace_filename = None):
         self.trace_out = Trace_Output(trace_filename)
         self.inst_cnt = 0
         self.ctrl_reg = Control_Register(0)  # Default: disabled
@@ -821,4 +826,4 @@ if __name__ == "__main__":
     encoder = BETR_Encoder()
     encoder.set_enable(True)
 
-    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
+    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_10.log")
