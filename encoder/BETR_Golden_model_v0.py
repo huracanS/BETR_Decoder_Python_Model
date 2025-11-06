@@ -102,10 +102,10 @@ class LogFileImporter:
                 ex_valid=data.get('ex_valid') == '1'
             )
             
-            # 添加打印命令
-            print(f"RVFI指令信息: PC=0x{instr.pc:08X}, 操作码=0x{instr.inst_op:02X}, "
-                f"压缩={instr.is_compressed}, 分支={instr.is_branch}, "
-                f"分支跳转={instr.is_taken}, 是否异常中断={instr.ex_valid}")
+            # # 添加打印命令
+            # print(f"RVFI指令信息: PC=0x{instr.pc:08X}, 操作码=0x{instr.inst_op:02X}, "
+            #     f"压缩={instr.is_compressed}, 分支={instr.is_branch}, "
+            #     f"分支跳转={instr.is_taken}, 是否异常中断={instr.ex_valid}")
 
             return instr
             
@@ -142,17 +142,21 @@ class TraceSignalWriter:
 
 ##@@-- 20251103-Add File system
 
+##@@-- 20251106-Add Package Saver.
+## ===============================
+## Trace Packet File Writer
+## ===============================
+class TracePkgWriter:
+    """保存trace包的纯整数信息"""
+    def __init__(self, filename="trace_pkg_only.txt"):
+        self.filename = filename
+        with open(self.filename, 'w') as f:
+            f.write("")  # 清空文件
 
-    # InDirect Jump
-    JALR = 0x19
-
-    # Branch
-    EQ   = 0x17
-    NE   = 0x18
-    LTS  = 0x13
-    GES  = 0x15
-    LTU  = 0x14
-    GEU  = 0x16
+    def save_pkg(self, trace_pkg: Trace_Pkg):
+        with open(self.filename, 'a') as f:
+            f.write(f"{trace_pkg.to_int():019X}\n")
+##@@-- 20251106-Add Package Saver.
 
 ## ===============================
 ## Output Interface Class  
@@ -161,7 +165,7 @@ class Trace_Output:
     """
     Simulates BETR encoder output signals
     """
-    def __init__(self,trace_filename = None):
+    def __init__(self,trace_filename = None, pkg_filename=None):
         self.trace_valid = 0
         self.trace_data = 0
         self.irq = 0
@@ -175,6 +179,13 @@ class Trace_Output:
                 f.write("")
         ##@@-- 20251103-Add File system
 
+        ##@@-- 20251106-Add Package Saver.
+        self.pkg_writer = None
+        if pkg_filename:
+            self.pkg_writer = TracePkgWriter(pkg_filename)
+            with open(pkg_filename, 'w') as f: f.write("")
+        ##@@-- 20251106-Add Package Saver.
+
     def send(self, trace_pkg: Trace_Pkg, sram_full=False):
         """
         Send trace packet, update output signals, and print readable format
@@ -187,6 +198,11 @@ class Trace_Output:
         if self.file_writer:
             self.file_writer.save_signal(self.trace_valid, self.trace_data)
         ##@@-- 20251103-Add File system
+
+        ##@@-- 20251106-Add Package Saver.
+        if self.pkg_writer:
+            self.pkg_writer.save_pkg(trace_pkg)
+        ##@@-- 20251106-Add Package Saver.
 
         # Formatted print (green)
         print("\033[32m" + f"TRACE_VALID={self.trace_valid}, "
@@ -357,11 +373,12 @@ def classify_instr(instr: RVFI_Instr):
         return 'TRAP'
 
     # Indirect jump
-    if instr.inst_op == 'JALR':
+    indirect_ops = {0x13,0x17,0x18,0x19}
+    if instr.inst_op in indirect_ops:# JALR,MRET,SRET,DRET
         return 'INDIRECT'
 
     # Branch instructions
-    branch_ops = {'EQ', 'NE', 'LTS', 'GES', 'LTU', 'GEU'}
+    branch_ops = {0x11, 0x12, 0x0D, 0x0F, 0x0E, 0x10}  # EQ, NE, LTS, GES, LTU, GEU
     if instr.inst_op in branch_ops:
         if instr.is_taken:
             return 'BR_TAKEN'
@@ -380,6 +397,7 @@ class BETR_Encoder:
     def __init__(self, sram_max_len=1024,trace_filename = None):
         self.trace_out = Trace_Output(trace_filename)
         self.inst_cnt = 0
+        self.br_cnt   = 0
         self.ctrl_reg = Control_Register(0)  # Default: disabled
         self.status_reg = Status_Register()  # Use new status register
         self.stop_addr_reg = Stop_Address_Register()  # Stop address register
@@ -391,6 +409,14 @@ class BETR_Encoder:
         self.sram_max_len = sram_max_len
         self.sram_used = 0
         self.curr_branch_addr = None  # Current instruction block start address
+        # +++ 新增：包类型统计（基于send_reason）+++
+        self.pkg_type_stats = {
+            'inst_cnt_max': 0,    # 指令计数满
+            'br_tkn_full': 0,     # 分支历史满
+            'trap': 0,            # 异常/中断
+            'indirect': 0,        # 间接跳转
+            'normal': 0           # 正常指令块
+        }
 
     def process_instr(self, instr: RVFI_Instr):
         if not instr.valid:
@@ -439,6 +465,7 @@ class BETR_Encoder:
         # Update br_tkn only valid for branch instructions
         if instr_type in ['BR_TAKEN', 'BR_NOT_TAKEN']:
             self.br_tkn = (self.br_tkn << 1) | (1 if instr_type == 'BR_TAKEN' else 0)
+            self.br_cnt += 1
 
         # Extend bit, only valid for TRAP
         extend = 1 if instr_type == 'TRAP' else 0
@@ -477,11 +504,19 @@ class BETR_Encoder:
         
         if not sram_full:
             trace_pkg = Trace_Pkg(self.curr_branch_addr, self.inst_cnt, self.br_tkn, extend)
+
+            # +++ 新增：基于send_reason更新包类型统计 +++
+            if send_reason in self.pkg_type_stats:
+                self.pkg_type_stats[send_reason] += 1
+            else:
+                self.pkg_type_stats['normal'] += 1  # 默认归为normal
+
             print(f"📦 Trigger packet send: {send_reason}")
             self.trace_out.send(trace_pkg, sram_full=False)  # Always pass sram_full=False to send()
             self.sram_buffer.append(trace_pkg.to_int())
             self.sram_used += 1
             self.inst_cnt = 0
+            self.br_cnt   = 0
             self.br_tkn = 0
             self.curr_branch_addr = None  # Reset for next block
         else:
@@ -494,7 +529,7 @@ class BETR_Encoder:
         instr_type = classify_instr(instr)
         if self.inst_cnt >= 1023:
             return True, 'inst_cnt_max'
-        if self.br_tkn & 0x80000000:
+        if self.br_cnt >= 32: 
             return True, 'br_tkn_full'
         if instr.ex_valid == 1:
             return True, 'trap'
@@ -535,18 +570,58 @@ class BETR_Encoder:
             "sram_packets": len(self.sram_buffer),
             "current_enabled": self.ctrl_reg.is_enabled(),
             "status_register": self.status_reg.read(),
+            "pkg_type_stats": self.pkg_type_stats.copy(),  # +++ 新增：包类型统计 ++
             "irq_active": self.irq_ctrl_reg.is_irq_active()
         }
+
+    # +++ 新增方法：打印包类型统计信息 +++
+    def print_package_statistics(self):
+        """打印包类型统计信息"""
+        print("\n" + "="*60)
+        print("📊 TRACE PACKAGE TYPE STATISTICS")
+        print("="*60)
+        
+        total_packets = sum(self.pkg_type_stats.values())
+        if total_packets == 0:
+            print("No trace packets generated yet.")
+            return
+        
+        # 定义类型名称映射
+        type_names = {
+            'inst_cnt_max': "Instruction Count Max",
+            'br_tkn_full': "Branch History Full", 
+            'trap': "Traps/Exceptions",
+            'indirect': "Indirect Jumps",
+            'normal': "Normal Blocks"
+        }
+        
+        # 打印详细统计
+        for reason in sorted(self.pkg_type_stats.keys()):
+            count = self.pkg_type_stats[reason]
+            percentage = (count / total_packets) * 100 if total_packets > 0 else 0
+            type_name = type_names.get(reason, reason)
+            
+            print(f"  {type_name:<25}: {count:4d} packets ({percentage:6.2f}%)")
+        
+        print("-"*60)
+        print(f"  {'TOTAL':<25}: {total_packets:4d} packets (100.00%)")
+        print("="*60)
 
     def reset(self):
         """Complete encoder reset"""
         self.inst_cnt = 0
+        self.br_cnt   = 0
         self.br_tkn = 0
         self.sram_buffer = []
         self.sram_used = 0
         self.curr_branch_addr = None
         self.last_enable_state = 0
         self.missed_instructions = 0
+
+        # +++ 新增：重置包类型统计 +++
+        for reason in self.pkg_type_stats:
+            self.pkg_type_stats[reason] = 0
+
         self.ctrl_reg.disable()
         self.status_reg = Status_Register()
         self.stop_addr_reg = Stop_Address_Register()
@@ -580,7 +655,11 @@ class BETR_Encoder:
         print(f"\n✅ 处理完成")
         print(f"   - 生成数据包: {stats['sram_packets']}")
         print(f"   - 丢失指令: {stats['total_missed']}")
-        print(f"   - 压缩率: {stats['sram_packets']/len(instructions):.2%}")    
+        print(f"   - 压缩率: {1 - stats['sram_packets']/len(instructions):.2%}")
+
+        # +++ 新增：打印包类型统计 +++
+        self.print_package_statistics()
+  
 
 def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, start_pc=0x00001000):
     instr_stream = []
@@ -811,19 +890,13 @@ def run_all_tests():
 ## Example Usage
 ## ===============================
 if __name__ == "__main__":
-    # 方式1: 运行所有测试
-    # run_all_tests()
-    
-    # 方式2: 运行单个测试
-    #test_basic_functionality()
-    # test_stop_address_feature()
     print(f"\nTEST Finished.")
     
-    # 方式3: 原有的演示代码（如果需要保留）
-    # run_original_demo()
-
-    # 4
-    encoder = BETR_Encoder()
+    # 方式：导入文件演示
+    encoder = BETR_Encoder(sram_max_len=1000000,trace_filename="trace_signal_full.txt")
+    encoder.trace_out.pkg_writer = TracePkgWriter("trace_pkg_only.txt")  # 保存纯包整数
     encoder.set_enable(True)
-
-    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_10.log")
+    
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_10.log")
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_allbr.log")
+    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
