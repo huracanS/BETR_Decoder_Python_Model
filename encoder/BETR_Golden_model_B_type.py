@@ -140,9 +140,7 @@ class TraceSignalWriter:
                     f"branch_addr:0x{branch_addr:08X}, "
                     f"inst_cnt:{inst_cnt}, "
                     f"br_tkn:0b{br_tkn:032b}, "
-                    f"extend:{extend}\n"
-                    
-                    )
+                    f"extend:{extend}\n")
             f.write(line)
 
 # Trace信号文件输出器：保存trace_valid和trace_data（完整格式，用于输出给解码器）.
@@ -610,6 +608,8 @@ class BETR_Encoder:
 
         # Print each instruction information
         branch_addr_str = f"0x{self.curr_branch_addr:08X}" if self.curr_branch_addr is not None else "N/A"
+        
+        #CONFIG()打印每条指令信息
         print(f"Instruction PC=0x{instr.pc:08X} | Type={instr_type:12s} | "
               f"Compressed={'Yes(16bit)' if is_compressed(instr) else 'No(32bit)'} | "
               f"inst_cnt={self.inst_cnt:02d} | br_tkn={self.br_tkn:032b} | "
@@ -825,7 +825,8 @@ class BETR_Encoder:
         
         # 处理所有导入的指令
         for i, instr in enumerate(instructions):
-            print(f"处理指令 {i+1}/{len(instructions)}: PC=0x{instr.pc:08X}")
+            # CONFIG()处理所有的指令
+            #print(f"处理指令 {i+1}/{len(instructions)}: PC=0x{instr.pc:08X}")
             self.process_instr(instr)
         
         # 输出统计信息

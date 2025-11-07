@@ -110,7 +110,7 @@ class LogFileImporter:
             return instr
             
         except Exception as e:
-            print(f"⚠️ 第 {line_num} 行解析失败: {line} - {e}")
+            print(f"【ERROR】第 {line_num} 行解析失败: {line} - {e}")
             return None
     
     def get_imported_data(self):
@@ -484,21 +484,21 @@ class BETR_Encoder:
         if instr_type == 'CALL':
             next_head = (self.head + 1) % self.stack_size
             if next_head == self.tail:
-                print(f"⚠️ CALL stack overflow at return_addr=0x{return_addr:08X}")
+                print(f"【STACK】CALL stack overflow at return_addr=0x{return_addr:08X}")
                 return
             self.ret_stack[self.head] = return_addr
-            print(f"🔹 CALL detected: return_addr=0x{return_addr:08X}")
+            print(f"【STACK】CALL detected: return_addr=0x{return_addr:08X}")
             self.head = next_head
 
         elif instr_type == 'RETURN':
             next_head = (self.head + 1) % self.stack_size
             if self.head == self.tail:
-                print("⚠️ RET with empty stack")
+                print("【STACK】RET with empty stack")
                 return 0
             # 出栈：tail 指针从 head 的前一个位置开始
             self.head = (self.head - 1 + self.stack_size) % self.stack_size
             self.return_stack_addr = self.ret_stack[self.head]
-            print(f"🔹 RET detected: jump back to 0x{self.return_stack_addr:08X}")
+            print(f"【STACK】RET detected: jump back to 0x{self.return_stack_addr:08X}")
             return self.return_stack_addr
         
     #2.堆栈丢失信息后的减少和刷新
@@ -514,7 +514,7 @@ class BETR_Encoder:
         
     #4.导出当前栈状态（用于调试或日志）
     def get_stack_status(self):
-        print("📋 Current CALL/RET stack status:")
+        print("【STACK】Current CALL/RET stack status:")
         print(f"  head={self.head}, tail={self.tail}")
         print(f"  stack contents={self.ret_stack}")
         return {
@@ -559,7 +559,7 @@ class BETR_Encoder:
         if not self.ctrl_reg.is_enabled():
             # Hardware real behavior: completely skip this instruction, no processing
             self.missed_instructions += 1
-            print(f"\033[90mInstruction PC=0x{instr.pc:08X} | Encoder disabled, instruction missed (Total missed: {self.missed_instructions})\033[0m")
+            print(f"\033[90m Instruction PC=0x{instr.pc:08X} | Encoder disabled, instruction missed (Total missed: {self.missed_instructions})\033[0m")
             return
             
         instr_type = classify_instr(instr)
@@ -594,10 +594,10 @@ class BETR_Encoder:
 
         # Print each instruction information
         branch_addr_str = f"0x{self.curr_branch_addr:08X}" if self.curr_branch_addr is not None else "N/A"
-        print(f"Instruction PC=0x{instr.pc:08X} | Type={instr_type:12s} | "
-              f"Compressed={'Yes(16bit)' if is_compressed(instr) else 'No(32bit)'} | "
-              f"inst_cnt={self.inst_cnt:02d} | br_tkn={self.br_tkn:032b} | "
-              f"branch_addr={branch_addr_str}")
+        # print(f"Instruction PC=0x{instr.pc:08X} | Type={instr_type:12s} | "
+        #       f"Compressed={'Yes(16bit)' if is_compressed(instr) else 'No(32bit)'} | "
+        #       f"inst_cnt={self.inst_cnt:02d} | br_tkn={self.br_tkn:032b} | "
+        #       f"branch_addr={branch_addr_str}")
 
         # Determine if trace packet should be sent
         send_flag, send_reason = self.should_send(instr)
@@ -638,7 +638,7 @@ class BETR_Encoder:
             else:
                 self.pkg_type_stats['normal'] += 1  # 默认归为normal
 
-            print(f"📦 Trigger packet send: {send_reason}")
+            print(f"【Package】Trigger packet send: {send_reason}")
             self.trace_out.send(trace_pkg, sram_full=False)  # Always pass sram_full=False to send()
             self.sram_buffer.append(trace_pkg.to_int())
             self.sram_used += 1
@@ -710,7 +710,7 @@ class BETR_Encoder:
     def print_package_statistics(self):
         """打印包类型统计信息"""
         print("\n" + "="*60)
-        print("📊 TRACE PACKAGE TYPE STATISTICS")
+        print("【PACKAGES】TRACE PACKAGE TYPE STATISTICS")
         print("="*60)
         
         total_packets = sum(self.pkg_type_stats.values())
@@ -753,16 +753,17 @@ class BETR_Encoder:
             print("❌ 没有可处理的指令")
             return
         
-        print(f"🚀 开始处理 {len(instructions)} 条指令...")
+        print(f"【START】开始处理 {len(instructions)} 条指令...")
         
         # 处理所有导入的指令
         for i, instr in enumerate(instructions):
-            print(f"处理指令 {i+1}/{len(instructions)}: PC=0x{instr.pc:08X}")
+            # CONFIG():打印处理指令的信息
+            # print(f"处理指令 {i+1}/{len(instructions)}: PC=0x{instr.pc:08X}")
             self.process_instr(instr)
         
         # 输出统计信息
         stats = self.get_stats()
-        print(f"\n✅ 处理完成")
+        print(f"\n【FINISH】处理完成")
         print(f"   - 生成数据包: {stats['sram_packets']}")
         print(f"   - 丢失指令: {stats['total_missed']}")
         print(f"   - 压缩率: {1 - stats['sram_packets']/len(instructions):.2%}")
@@ -858,7 +859,7 @@ def test_basic_functionality():
 
 def test_stop_address_feature():
     """测试停止地址功能"""
-    print("\n🧪 Testing Stop Address Feature")
+    print("\n【STOP-ADDR】Testing Stop Address Feature")
     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_stop_address_trace.txt")
     
     # 设置停止地址在中间位置
@@ -872,18 +873,18 @@ def test_stop_address_feature():
     for i, instr in enumerate(instr_stream):
         betr.process_instr(instr)
         if betr.irq_ctrl_reg.is_irq_active():
-            print(f"Stop address IRQ triggered at PC=0x{instr.pc:08X}")
+            print(f"【STOP-ADDR】Stop address IRQ triggered at PC=0x{instr.pc:08X}")
             irq_triggered = True
             break
     
     if not irq_triggered:
-        print("Stop address IRQ was not triggered")
+        print("【STOP-ADDR】Stop address IRQ was not triggered")
     
     return betr
 
 def test_sram_full_condition():
     """测试SRAM满条件"""
-    print("\nTesting SRAM Full Condition")
+    print("\n【STOP-ADDR】Testing SRAM Full Condition")
     betr = BETR_Encoder(sram_max_len=2, trace_filename="test_sram_full_trace.txt")
     betr.set_enable(True)
     
@@ -892,38 +893,38 @@ def test_sram_full_condition():
     for i, instr in enumerate(instr_stream[:8]):
         betr.process_instr(instr)
         if betr.irq_ctrl_reg.is_irq_active():
-            print(f"SRAM full IRQ triggered after {i+1} instructions")
+            print(f"【STOP-ADDR】SRAM full IRQ triggered after {i+1} instructions")
             break
     
     return betr
 
 def test_encoder_enable_disable():
     """测试编码器启用/禁用功能"""
-    print("\nTesting Encoder Enable/Disable")
+    print("\n【STOP-ADDR】Testing Encoder Enable/Disable")
     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_enable_disable_trace.txt")
     
     instr_stream = gen_instr_stream(normal_len=10, branch_len=2, trap_len=0, indirect_len=0)
     
     # 阶段1: 禁用状态
-    print("Phase 1: Encoder Disabled")
+    print("【STOP-ADDR】Phase 1: Encoder Disabled")
     betr.set_enable(False)
     for i in range(3):
         betr.process_instr(instr_stream[i])
     
     # 阶段2: 启用状态
-    print("Phase 2: Encoder Enabled")
+    print("【STOP-ADDR】Phase 2: Encoder Enabled")
     betr.set_enable(True)
     for i in range(3, 6):
         betr.process_instr(instr_stream[i])
     
     # 阶段3: 再次禁用
-    print("Phase 3: Encoder Disabled Again")
+    print("【STOP-ADDR】Phase 3: Encoder Disabled Again")
     betr.set_enable(False)
     for i in range(6, 8):
         betr.process_instr(instr_stream[i])
     
     stats = betr.get_stats()
-    print(f"Enable/disable test completed: {stats['total_missed']} instructions missed")
+    print(f"【STOP-ADDR】Enable/disable test completed: {stats['total_missed']} instructions missed")
     return betr
 
 def test_comprehensive_scenario():
@@ -1016,7 +1017,7 @@ if __name__ == "__main__":
     #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_allbr.log")
 
     #简易测试 8000条指令coremark
-    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_8000.log")
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_8000.log")
 
     #实际测试 全代码coremark
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
+    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
