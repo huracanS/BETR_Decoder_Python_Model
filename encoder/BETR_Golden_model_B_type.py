@@ -140,7 +140,9 @@ class TraceSignalWriter:
                     f"branch_addr:0x{branch_addr:08X}, "
                     f"inst_cnt:{inst_cnt}, "
                     f"br_tkn:0b{br_tkn:032b}, "
-                    f"extend:{extend}\n")
+                    f"extend:{extend}\n"
+                    
+                    )
             f.write(line)
 
 # Trace信号文件输出器：保存trace_valid和trace_data（完整格式，用于输出给解码器）.
@@ -440,7 +442,8 @@ class BETR_Encoder:
             'br_tkn_full': 0,     # 分支历史满
             'trap': 0,            # 异常/中断
             'indirect': 0,        # 间接跳转
-            'normal': 0           # 正常指令块
+            'normal': 0 ,          # 正常指令块
+            'beat_tkn_full':0      #@@TODO():Test for Compressed Branch
         }
 
         ##@@20251106-Add CALL/RETURN Stack
@@ -453,6 +456,15 @@ class BETR_Encoder:
         # 保存上一拍的指令类型
         self.prev_instr_type   = None # 保存上一拍的指令类型
         ##@@20251106-Add CALL/RETURN Stack
+
+        ##@@20251106-Add Repeated Br
+        self.prev_br_bit = None     # 保存上一条 br_tkn 的 bit（1/0）
+        self.beat_tkn = 0
+        self.beat_cnt = 0
+        self.beat_break = 0
+        self.repeat_cnt = 0         # 重复次数
+        self.B_value = 0            # 当前重复的值
+        ##@@20251106-Add Repeated Br
 
     def reset(self):
         """Complete encoder reset"""
@@ -581,6 +593,10 @@ class BETR_Encoder:
             # handle_call_ret(self, instr_type, instr.pc)
         # #@TODO:()
 
+        ##@@TODO:() New Branch
+        self.New_branch_test(instr)
+        ##@@TODO:() New Branch
+
         # Accumulate instruction length
         self.inst_cnt += 2 if not is_compressed(instr) else 1
 
@@ -604,10 +620,50 @@ class BETR_Encoder:
         if send_flag:
             self._send_trace_packet(send_reason, extend)
 
-        #@@TODO：（）
         # -------- 新增：保存上一拍指令类型 --------
         #@@TODO:()
         self.prev_instr_type = instr_type
+    
+    #@@TODO:()
+    # 测试新的br模式
+    def New_branch_test(self,instr):
+        instr_type = classify_instr(instr)
+
+        if instr_type in ['BR_TAKEN', 'BR_NOT_TAKEN']:
+            curr_bit = 1 if instr_type == 'BR_TAKEN' else 0
+
+            if self.prev_br_bit is None:
+                # 第一条分支
+                self.prev_br_bit = curr_bit
+                self.B_value     = curr_bit
+                self.repeat_cnt  = 1
+                print(
+                    f"\033[33mCurr_pc=0x{instr.pc:08x} "
+                    f"[STATE] prev_br_bit={self.prev_br_bit}, curr_bit={curr_bit}, "
+                    f"B_value={self.B_value},"
+                    f"repeat_cnt={self.repeat_cnt}, beat_break={self.beat_break}, "
+                    f"beat_tkn={self.beat_tkn:032b}, beat_cnt={self.beat_cnt}\033[0m"
+                )
+                return
+            
+            if (curr_bit == self.prev_br_bit) and (self.repeat_cnt < 16) and (self.beat_break != 1):
+                # 连续重复，增加重复计数
+                self.repeat_cnt += 1
+            else:
+                self.beat_break = 1
+                self.beat_tkn = (self.beat_tkn << 1) | curr_bit
+                self.beat_cnt += 1
+
+            self.prev_br_bit = curr_bit
+            print(
+                f"\033[33mCurr_pc=0x{instr.pc:08x} "
+                f"[STATE] prev_br_bit={self.prev_br_bit}, curr_bit={curr_bit}, "
+                f"B_value={self.B_value},"
+                f"repeat_cnt={self.repeat_cnt}, beat_break={self.beat_break}, "
+                f"beat_tkn={self.beat_tkn:032b}, beat_cnt={self.beat_cnt}\033[0m"
+            )
+
+        #@@TODO:()
 
     def _trigger_irq_stop_address(self):
         """Trigger IRQ due to stop address hit"""
@@ -646,6 +702,14 @@ class BETR_Encoder:
             self.br_cnt   = 0
             self.br_tkn = 0
             self.curr_branch_addr = None  # Reset for next block
+            #@TODO:()
+            self.prev_br_bit = None     # 保存上一条 br_tkn 的 bit（1/0）
+            self.beat_tkn = 0
+            self.beat_cnt = 0
+            self.beat_break = 0
+            self.repeat_cnt = 0         # 重复次数
+            self.B_value = 0            # 当前重复的值
+            #@TODO:()
         else:
             self._trigger_irq_sram_full()
 
@@ -656,14 +720,17 @@ class BETR_Encoder:
         instr_type = classify_instr(instr)
         if self.inst_cnt >= 1023:
             return True, 'inst_cnt_max'
-        if self.br_cnt >= 32: 
-            return True, 'br_tkn_full'
+        # if self.br_cnt >= 32: 
+        #     return True, 'br_tkn_full'
         if instr.ex_valid == 1:
             return True, 'trap'
         #@TODO:()
         #if !self.mis_stack:
         #   return True, 'STACK_MISS'
         # 堆栈预测失败后发包
+        if self.beat_cnt >= 27:
+            return True,'beat_tkn_full'
+        # 压缩包模式分支信息满
         #@TODO:()
         if instr_type == 'INDIRECT':
             return True, 'indirect'
@@ -724,7 +791,8 @@ class BETR_Encoder:
             'br_tkn_full': "Branch History Full", 
             'trap': "Traps/Exceptions",
             'indirect': "Indirect Jumps",
-            'normal': "Normal Blocks"
+            'normal': "Normal Blocks",
+            'beat_tkn_full':"beat_tkn_Full"
         }
         
         # 打印详细统计
@@ -1012,11 +1080,14 @@ if __name__ == "__main__":
     #简易测试 10条指令coremark
     #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_10.log")
 
-    #压力测试 全分支指令(pc不对的模拟版本)
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_allbr.log")
+    #简易测试 400条指令coremark
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_400.log")
 
     #简易测试 8000条指令coremark
     encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_8000.log")
+
+    #压力测试 全分支指令(pc不对的模拟版本)
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_allbr.log")
 
     #实际测试 全代码coremark
     #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
