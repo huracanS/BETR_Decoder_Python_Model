@@ -387,15 +387,11 @@ def classify_instr(instr: RVFI_Instr):
     # Indirect jump
     # 区分成三种间接分支指令类型：
     #   还要考虑RET指令，RET指令是什么类型
-    #   1.JALR，目标地址是RET的类型，当作间接跳转包处理发送数据包；
+    #   1.JALR，C.JALR,目标地址是RET的类型，当作间接跳转包处理发送数据包；
     #   2.JALR，目标地址不是RET的类型，执行压栈操作；
     #   3.MRET/SRET/DRET：视为间接跳转包处理发送数据包。
     
     ###TODO():
-    # 1-没考虑压缩指令!!!!!!!
-    # 2-根据Spec完成JALR的解码操作.
-    # 3-学习RLE的压缩算法.
-
     # # @TODO:Need to add CALL/RET Recognization.
     
     # JAL指令
@@ -533,13 +529,16 @@ class BETR_Encoder:
         if instr_type == 'CALL' or instr_type == 'SELF_CALL':
             next_head = (self.head + 1) % self.stack_size
             if next_head == self.tail:
-                print(f"【STACK】CALL stack overflow at return_addr=0x{return_addr:08X}")
-                return 0,0
-            else:
-                self.ret_stack[self.head] = return_addr
-                print(f"【STACK】CALL push → return_addr=0x{return_addr:08X}, head={self.head}->{next_head}")
-                self.head = next_head
-                return 0,0
+                # Stack 已满，丢弃最老的 CALL（tail 指向的）
+                print(f"【STACK】CALL stack full, discard oldest at 0x{self.ret_stack[self.tail]:08X}")
+                self.tail = (self.tail + 1) % self.stack_size  # tail 前移，腾出空间
+                # 注意这里不 return，继续压入新 CALL
+
+            # 压入新 CALL
+            self.ret_stack[self.head] = return_addr
+            print(f"【STACK】CALL push → return_addr=0x{return_addr:08X}, head={self.head}->{next_head}")
+            self.head = next_head
+            return 0,0
 
         # ======================================================
         # RETURN: Pop return address
@@ -557,6 +556,24 @@ class BETR_Encoder:
                 print(f"【STACK】RETURN pop ← jump_back=0x{self.return_stack_addr:08X}, head={self.head}")
                 return 1,self.return_stack_addr
         
+        # ======================================================
+        # COROUTINE: Pop then Push
+        # ======================================================
+        elif instr_type == 'COROUTINE':
+            # POP（如果栈非空）
+            if self.head != self.tail:
+                self.head = (self.head - 1 + self.stack_size) % self.stack_size
+                self.ret_stack[self.head] = 0
+                print(f"【STACK】COROUTINE pop ← old_addr cleared, head={self.head}")
+            else:
+                print(f"【STACK】COROUTINE pop skipped, stack empty")
+
+            # PUSH
+            self.ret_stack[self.head] = return_addr
+            self.head = (self.head + 1) % self.stack_size
+            print(f"【STACK】COROUTINE push → return_addr=0x{return_addr:08X}, head={self.head}")
+            return 0,0
+
         else:
             # 非CALL/RET类型不处理
             return 0,0
