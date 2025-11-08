@@ -528,20 +528,21 @@ class BETR_Encoder:
 
     # 指令计算的主函数
     def process_instr(self, instr: RVFI_Instr):
+        # 1 - 指令无效跳过
         if not instr.valid:
             return  # Ignore invalid instructions
 
-        # If IRQ is already active (from previous stop address hit or SRAM full), skip processing
+        # 2 - If IRQ is already active (from previous stop address hit or SRAM full), skip processing
         if self.irq_ctrl_reg.is_irq_active():
             print(f"\033[90mInstruction PC=0x{instr.pc:08X} | IRQ active, skipping instruction\033[0m")
             return
 
-        # Check stop address hit - triggers IRQ and stops processing
+        # 3 - Check stop address hit - triggers IRQ and stops processing
         if self.stop_addr_reg.check_stop_address(instr.pc):
             self._trigger_irq_stop_address()
             return  # Stop processing further instructions when stop address is hit
 
-        # Detect enable state change
+        # 4 - Detect enable state change
         current_enable = self.ctrl_reg.is_enabled()
         if self.last_enable_state == 0 and current_enable == 1:
             # Disabled → Enabled: reset statistics, start new instruction block
@@ -555,7 +556,7 @@ class BETR_Encoder:
             
         self.last_enable_state = current_enable
 
-        # Check if encoder is enabled
+        # 5 - Check if encoder is enabled
         if not self.ctrl_reg.is_enabled():
             # Hardware real behavior: completely skip this instruction, no processing
             self.missed_instructions += 1
@@ -564,7 +565,7 @@ class BETR_Encoder:
             
         instr_type = classify_instr(instr)
 
-        # Initialize current instruction block start address
+        # 6 - Initialize current instruction block start address
         if self.curr_branch_addr is None:
             self.curr_branch_addr = instr.pc
 
@@ -750,7 +751,7 @@ class BETR_Encoder:
         instructions = importer.import_log_file(log_filename)
         
         if not instructions:
-            print("❌ 没有可处理的指令")
+            print("❌没有可处理的指令")
             return
         
         print(f"【START】开始处理 {len(instructions)} 条指令...")
@@ -1020,4 +1021,7 @@ if __name__ == "__main__":
     #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_8000.log")
 
     #实际测试 全代码coremark
-    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
+
+    #简易测试 100条指令
+    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_100_stack.log")
