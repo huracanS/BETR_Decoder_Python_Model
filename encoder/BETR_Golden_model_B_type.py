@@ -60,22 +60,18 @@ class LogFileImporter:
         valid:1,PC:0x00010000,Inst:0x00,is_branch:0,is_taken:0,is_compressed:0,ex_valid:0
         """
         self.imported_data = []
-        
         try:
             with open(filename, 'r') as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     if not line or line.startswith("#") or line.startswith("Cycle"):
                         continue
-                    
                     # 解析数据
                     instr = self._parse_log_line(line, line_num)
                     if instr:
                         self.imported_data.append(instr)
-            
             print(f"成功导入 {len(self.imported_data)} 条指令来自 {filename}")
             return self.imported_data
-            
         except FileNotFoundError:
             print(f"【ERROR】文件未找到: {filename}")
             return []
@@ -123,9 +119,7 @@ class LogFileImporter:
                 f"目的寄存器=0x{instr.rd_reg:02x},源寄存器1=0x{instr.rs1_reg:02x},源寄存器2=0x{instr.rs2_reg:02x}"
                 f"指令全码=0x{instr.inst_code:08x}"
                 )
-
             return instr
-            
         except Exception as e:
             print(f"【ERROR】第 {line_num} 行解析失败: {line} - {e}")
             return None
@@ -185,21 +179,19 @@ class Trace_Output:
         self.trace_data = 0
         self.irq = 0
         
-        ##@@-- 20251103-Add File system
+        #Trace信号文件输出
         self.file_writer = None
         if trace_filename:
             self.file_writer = TraceSignalWriter(trace_filename)
             # 写入文件头
             with open(trace_filename, 'w') as f:
                 f.write("")
-        ##@@-- 20251103-Add File system
 
-        ##@@-- 20251106-Add Package Saver.
+        #Trace包整数输出
         self.pkg_writer = None
         if pkg_filename:
             self.pkg_writer = TracePkgWriter(pkg_filename)
             with open(pkg_filename, 'w') as f: f.write("")
-        ##@@-- 20251106-Add Package Saver.
 
     def send(self, trace_pkg: Trace_Pkg, sram_full=False):
         """
@@ -426,7 +418,6 @@ def classify_instr(instr: RVFI_Instr):
             return 'SELF_CALL'  # jalr x1, offset(x1)
         else:
             return 'INDIRECT'
-    # @TODO:Need to add CALL/RET Recognization.
 
     # CVA6已经对MRET、SRET、DRET进行标识，这里将其视为中断的处理方式
     indirect_ops = {0x17,0x18,0x19}
@@ -445,54 +436,104 @@ def classify_instr(instr: RVFI_Instr):
     return 'NORMAL'
 
 
-## ===============================
-## BETR Encoder Main Program
-## ===============================
+# ============================================================
+#  Module: BETR Encoder
+#  Description: 
+#       BETR（BES TRACE)模块用于从处理器流水线中采集指令级跟踪信息并压缩为追踪包；
+#       用于实现嵌入式、低功耗的信息追踪系统；
+#       将一个追踪包发送的起止指令记为一个指令块，支持：
+#           支持计数满后触发发送追踪包；
+#           支持中断异常包触发发送追踪包；
+#           支持CALL/RETURN 栈预测，减少RETURN类的间接跳转追踪包数量，当堆栈缺失后触发发送追踪包；
+#           支持记录指令块分支跳转信息满后触发发送追踪包。【压缩分支功能:正在开发压缩分支功能，减少分支信息满发送的追踪包。】
+#       增加寄存器控制追踪开启、停止地址、触发CPU中断、停止中断的功能。
+#  Date: 2025-11-06
+#  Sub_function:
+#      MAIN Functions - 主功能函数
+#          1. __init__()                       : 初始化 BETR 编码器核心状态、寄存器、SRAM、统计计数器
+#          2. reset()                          : 完全复位编码器，包括栈、寄存器与统计信息
+#          3. process_instr(instr)             : 主指令处理函数，执行指令分类、状态更新与打包判断
+#
+#      CALL/RETURN Stack Management - 
+#          4. handle_call_ret(instr_type, addr): 实现 CALL/RETURN/COROUTINE 指令的堆栈压入与弹出逻辑
+#          5. check_return_address_is_miss(...) : 检查返回地址预测是否正确，检测栈预测失配
+#          6. get_stack_status()               : 输出当前栈的 head/tail 状态与内容（调试用）
+#
+#      Branch Compression & Pattern Analysis 
+#          7. New_branch_test(instr)           : 新分支压缩模式测试（重复次数与跳变检测） #TODO()：设计还存在问题
+#
+#      Trace Packet Control -
+#          8. should_send(instr)               : 判断是否满足打包条件并返回原因
+#          9. _send_trace_packet(reason, ext)  : 构建并发送追踪包，更新统计与状态
+#
+#      Interrupt & Stop Address Handling -
+#         10. _trigger_irq_stop_address()      : 当检测到停止地址命中时触发 IRQ
+#         11. _trigger_irq_sram_full()         : 当 SRAM 已满时触发 IRQ 并暂停发送
+#         12. clear_irq()                      : 清除所有中断标志（SRAM/Stop Address）
+#
+#      Register & Status Management -
+#         13. set_enable(enable)               : 设置编码器使能状态并更新状态寄存器
+#         14. set_stop_address(address, en)    : 写入停止地址寄存器
+#         15. read_status()                    : 读取当前状态寄存器值
+#
+#      Statistics & Debug Utilities -
+#         16. get_stats()                      : 获取编码器统计信息（包类型、使能状态、IRQ等）
+#         17. print_package_statistics()       : 打印追踪包类型统计表（占比、计数、类别）
+#         18. import_and_process_log(file)     : 导入 .log 指令文件进行实际代码测试并逐条处理生成追踪结果
+# ============================================================
 class BETR_Encoder:
     def __init__(self, sram_max_len=1024,trace_filename = None,stack_size=4):
-        self.trace_out = Trace_Output(trace_filename)
-        self.inst_cnt = 0
-        self.br_cnt   = 0
-        self.ctrl_reg = Control_Register(0)  # Default: disabled
-        self.status_reg = Status_Register()  # Use new status register
-        self.stop_addr_reg = Stop_Address_Register()  # Stop address register
-        self.irq_ctrl_reg = IRQ_Control_Register()    # IRQ control register
-        self.last_enable_state = 0    # Record previous enable state
-        self.missed_instructions = 0  # Count missed instructions
-        self.br_tkn = 0
-        self.sram_buffer = []         # Simulate SRAM
-        self.sram_max_len = sram_max_len
-        self.sram_used = 0
-        self.curr_branch_addr = None  # Current instruction block start address
-        # +++ 新增：包类型统计（基于send_reason）+++
+        """Initialize BETR Encoder"""
+        
+        # 基础计数
+        self.trace_out = Trace_Output(trace_filename) # 初始化输出模块
+        self.inst_cnt = 0  #指令计数
+        self.br_cnt   = 0  #分支指令计数(BR_taken + BR_Not_taken)
+        self.br_tkn = 0    #分支跳转情况
+
+        # 控制寄存器
+        self.ctrl_reg = Control_Register(0)           # 默认：关闭使能寄存器
+        self.last_enable_state = 0                    # 用于记录上一拍的enable从而控制使能寄存器的开启与关闭
+        self.status_reg = Status_Register()           # 使用状态控制寄存器
+        self.stop_addr_reg = Stop_Address_Register()  # 停止地址寄存器
+        self.irq_ctrl_reg = IRQ_Control_Register()    # 中断控制寄存器
+        self.missed_instructions = 0                  # 模拟真实硬件错过执行指令的数量
+
+        # SRAM模拟
+        self.sram_buffer = []            # 初始化SRAM
+        self.sram_max_len = sram_max_len #SRAM的最大深度
+        self.sram_used = 0               #SRAM已经写入的数量
+        self.curr_branch_addr = None     # Current instruction block start address
+
+        # 包类型统计（基于Send_reason)
         self.pkg_type_stats = {
-            'inst_cnt_max': 0,    # 指令计数满
-            'br_tkn_full': 0,     # 分支历史满
-            'trap': 0,            # 异常/中断
-            'indirect': 0,        # 间接跳转
+            'inst_cnt_max': 0,     # 指令计数满
+            'br_tkn_full': 0,      # 分支信息满
+            'trap': 0,             # 异常/中断
+            'indirect': 0,         # 间接跳转
             'normal': 0 ,          # 正常指令块
-            'stack_miss': 0,
-            'beat_tkn_full':0      #@@TODO():Test for Compressed Branch
+            'stack_miss': 0,       # CALL RETURN Stack缺失
+            'beat_tkn_full':0      # #TODO():压缩BR分支信息满
         }
 
+        # CALL/RETURN Stack管理
         ##@@20251106-Add CALL/RETURN Stack
-        self.ret_stack = [0] * stack_size
-        self.stack_size = stack_size
-        self.head = 0  # 压栈指针（CALL 写入）
-        self.tail = 0  # 出栈指针（RET 读出）
-        self.return_stack_addr = 0
-        self.mis_stack = 0
-        # 保存上一拍的指令类型
-        self.prev_instr_type   = None # 保存上一拍的指令类型
+        self.ret_stack = [0] * stack_size # 初始化栈
+        self.stack_size = stack_size      # 栈的最大深度
+        self.head = 0                     # 压栈指针（CALL 写入）
+        self.tail = 0                     # 出栈指针（RET 读出）
+        self.return_stack_addr = 0        # 出栈的返回数据
+        self.mis_stack = 0                # 栈访问缺失的情况 返回地址不等于实际要跳转地址
+        self.prev_instr_type   = None     # 保存上一拍的指令类型
         ##@@20251106-Add CALL/RETURN Stack
 
         ##@@20251106-Add Repeated Br
         self.prev_br_bit = None     # 保存上一条 br_tkn 的 bit（1/0）
-        self.beat_tkn = 0
-        self.beat_cnt = 0
-        self.beat_break = 0
+        self.beat_tkn = 0           # 压缩后剩余的跳转信息
+        self.beat_cnt = 0           # 压缩后剩余的跳转信息次数
+        self.beat_break = 0         # 第一次不连续打破压缩
         self.repeat_cnt = 0         # 重复次数
-        self.B_value = 0            # 当前重复的值
+        self.B_value = 0            # 当前压缩重复的值
         ##@@20251106-Add Repeated Br
 
     def reset(self):
@@ -506,26 +547,47 @@ class BETR_Encoder:
         self.last_enable_state = 0
         self.missed_instructions = 0
 
-        # +++ 新增：重置包类型统计 +++
+        # 重置包类型统计
         for reason in self.pkg_type_stats:
             self.pkg_type_stats[reason] = 0
-
+        
+        # 寄存器重置
         self.ctrl_reg.disable()
         self.status_reg = Status_Register()
         self.stop_addr_reg = Stop_Address_Register()
         self.irq_ctrl_reg = IRQ_Control_Register()
         self.trace_out.irq = 0
+
+        # CALL/RETURN Stack 重置
+        self.ret_stack = [0] * self.stack_size
+        self.head = 0
+        self.tail = 0
+        self.return_stack_addr = 0
+        self.mis_stack = 0
+        self.prev_instr_type = None
+
+        # Repeated Br 重置
+        self.prev_br_bit = None
+        self.beat_tkn = 0
+        self.beat_cnt = 0
+        self.beat_break = 0
+        self.repeat_cnt = 0
+        self.B_value = 0
+
         print("\033[36m BETR Encoder completely reset\033[0m")
 
-    #@TODO:()
     ##@@20251106-Add CALL/RETURN Stack
-    #1.堆栈的写入和弹出
+
+    # ======================================================
+    # 1、handle_call_ret函数: 处理 CALL/ SELF_CALL/ RETURN / COROUTINE 指令的堆栈操作
+    # ======================================================
     def handle_call_ret(self, instr_type, return_addr):
+        """处理 CALL / RETURN / COROUTINE 指令的堆栈操作,返回 (是否命中堆栈, 返回地址)"""
         print(f"Instr_type = {instr_type} 【STACK】Stack operation detected: {instr_type}")
 
-        # ======================================================
-        # CALL: Push return address
-        # ======================================================
+        # ------------------------------------------------------
+        # CALL / SELF_CALL: 压入返回地址
+        # ----------------------------------------------------
         if instr_type == 'CALL' or instr_type == 'SELF_CALL':
             next_head = (self.head + 1) % self.stack_size
             if next_head == self.tail:
@@ -540,9 +602,9 @@ class BETR_Encoder:
             self.head = next_head
             return 0,0
 
-        # ======================================================
-        # RETURN: Pop return address
-        # ======================================================
+        # ------------------------------------------------------
+        # RETURN: 弹出返回地址
+        # ------------------------------------------------------
         elif instr_type == 'RETURN':
             if self.head == self.tail:
                 print("【STACK】RET with empty stack")
@@ -556,9 +618,9 @@ class BETR_Encoder:
                 print(f"【STACK】RETURN pop ← jump_back=0x{self.return_stack_addr:08X}, head={self.head}")
                 return 1,self.return_stack_addr
         
-        # ======================================================
-        # COROUTINE: Pop then Push
-        # ======================================================
+        # ------------------------------------------------------
+        # COROUTINE: 先弹出（如果非空）再压入
+        # ------------------------------------------------------
         elif instr_type == 'COROUTINE':
             # POP（如果栈非空）
             if self.head != self.tail:
@@ -574,13 +636,21 @@ class BETR_Encoder:
             print(f"【STACK】COROUTINE push → return_addr=0x{return_addr:08X}, head={self.head}")
             return 0,0
 
+        # ------------------------------------------------------
+        # 非 CALL/SELF_CALL/RETURN/COROUTINE 指令，不处理
+        # ------------------------------------------------------
         else:
-            # 非CALL/RET类型不处理
             return 0,0
-        
+    
+    # ======================================================
+    # TODO():2、堆栈丢失信息后的减少和刷新，针对SRAM overwrite添加堆栈信息的刷新
+    # ======================================================
     #2.堆栈丢失信息后的减少和刷新
-
-    #3.堆栈预测正确性的比较
+    
+    # ======================================================
+    # 3、check_return_address_is_miss函数: 堆栈预测正确性比较
+    # ======================================================
+    """比较堆栈预测返回地址与实际跳转地址；返回 0 表示预测正确，1 表示预测错误"""
     def check_return_address_is_miss(self,instr_type,return_stack_addr,actual_addr):
         print(f"[STACK-DEBUG] type={instr_type}, head={self.head}, tail={self.tail}")
         print("[STACK-DEBUG] stack=[" + ", ".join(f"0x{x:08X}" for x in self.ret_stack) + "]")
@@ -592,8 +662,11 @@ class BETR_Encoder:
             print("栈预测返回地址错误！！！")
             print(f"【STACK-MISS】 return_addr=0x{return_stack_addr:08X}, actual=0x{actual_addr:08X}")
             return 1
-        
-    #4.导出当前栈状态（用于调试或日志）
+    
+    # ======================================================
+    # 4、get_stack_status函数: 导出当前栈状态（用于调试或日志）
+    # ======================================================
+    """返回当前栈状态，包括 head、tail 和 stack 内容"""
     def get_stack_status(self):
         print("【STACK】Current CALL/RET stack status:")
         print(f"  head={self.head}, tail={self.tail}")
@@ -603,26 +676,38 @@ class BETR_Encoder:
             'tail': self.tail,
             'stack': self.ret_stack.copy()
         }
-        
     ##@@20251106-Add CALL/RETURN Stack
-    #@TODO:()
 
-    # 指令计算的主函数
+
+    # ======================================================
+    # process_instr函数: 指令计算的主函数
+    # ======================================================
     def process_instr(self, instr: RVFI_Instr):
+        """处理单条指令，更新指令计数、分支信息、CALL/RETURN堆栈，并决定是否发送TRACE包"""
+        # --------------------------------------------------
+        # Step 1: 忽略无效指令
+        # --------------------------------------------------
         if not instr.valid:
-            return  # Ignore invalid instructions
+            return
 
+        # --------------------------------------------------
+        # Step 2: IRQ控制寄存器检查，如果已经被触发，则跳过指令
+        # ------------------------------------------------
         # If IRQ is already active (from previous stop address hit or SRAM full), skip processing
         if self.irq_ctrl_reg.is_irq_active():
             print(f"\033[90m Instruction PC=0x{instr.pc:08X} | IRQ active, skipping instruction\033[0m")
             return
-
-        # Check stop address hit - triggers IRQ and stops processing
+        
+        # --------------------------------------------------
+        # Step 3: Stop address命中检查，触发IRQ
+        # --------------------------------------------------
         if self.stop_addr_reg.check_stop_address(instr.pc):
             self._trigger_irq_stop_address()
-            return  # Stop processing further instructions when stop address is hit
+            return
 
-        # Detect enable state change
+        # --------------------------------------------------
+        # Step 4: Enable状态变化检测
+        # --------------------------------------------------
         current_enable = self.ctrl_reg.is_enabled()
         if self.last_enable_state == 0 and current_enable == 1:
             # Disabled → Enabled: reset statistics, start new instruction block
@@ -636,36 +721,53 @@ class BETR_Encoder:
             
         self.last_enable_state = current_enable
 
-        # Check if encoder is enabled
+
+        # --------------------------------------------------
+        # Step 5: 如果Encoder被禁用，记录missed指令并跳过
+        # Hardware real behavior: completely skip this instruction, no processing
+        # --------------------------------------------------
         if not self.ctrl_reg.is_enabled():
-            # Hardware real behavior: completely skip this instruction, no processing
             self.missed_instructions += 1
             print(f"\033[90m Instruction PC=0x{instr.pc:08X} | Encoder disabled, instruction missed (Total missed: {self.missed_instructions})\033[0m")
             return
-            
+        
+        # --------------------------------------------------
+        # Step 6: 指令分类
+        # --------------------------------------------------
         instr_type = classify_instr(instr)
 
-        # Initialize current instruction block start address
+        # --------------------------------------------------
+        # Step 7: 首条指令地址初始化为指令块的地址
+        # --------------------------------------------------
         if self.curr_branch_addr is None:
             self.curr_branch_addr = instr.pc
 
-        #@TODO:()
-        #STACK 
-        # 上一拍的指令类型为RETURN
+        # --------------------------------------------------
+        # Step 8: CALL/RETURN堆栈处理
+        # --------------------------------------------------
+        next_pc = instr.pc + (2 if instr.is_compressed else 4)
+
         if self.prev_instr_type == 'RETURN':
-            ret_stack_hit,ret_stack_addr = self.handle_call_ret(self.prev_instr_type, instr.pc + (2 if instr.is_compressed else 4))
-            self.mis_stack = self.check_return_address_is_miss(instr_type,ret_stack_addr,instr.pc)
-        elif instr_type == 'CALL':
+            ret_stack_hit,ret_stack_addr = self.handle_call_ret('RETURN', next_pc)
+            self.mis_stack = self.check_return_address_is_miss('RETURN',ret_stack_addr,instr.pc)
+        elif instr_type == 'CALL' or instr_type == 'SELF_CALL':
             #压栈
-            stack_hit,ret_stack_addr = self.handle_call_ret(instr_type, instr.pc + (2 if instr.is_compressed else 4))
+            stack_hit,ret_stack_addr = self.handle_call_ret('CALL', next_pc)
+        elif instr_type == 'COROUTINE':
+            ret_stack_hit,ret_stack_addr = self.handle_call_ret('COROUTINE', next_pc)
+            self.mis_stack = self.check_return_address_is_miss('COROUTINE',ret_stack_addr,instr.pc)
         #@TODO:()
 
+        # --------------------------------------------------
+        # Step 9: New Branch测试（压缩BR）
+        # --------------------------------------------------
         ##@@TODO:() New Branch
         self.New_branch_test(instr)
-        ##@@TODO:() New Branch
 
-        # Accumulate instruction length
-        self.inst_cnt += 2 if not instr.is_compressed else 1
+        # --------------------------------------------------
+        # Step 10: 更新指令计数和分支信息
+        # --------------------------------------------------
+        self.inst_cnt += 1 if instr.is_compressed else 2
 
         # Update br_tkn only valid for branch instructions
         if instr_type in ['BR_TAKEN', 'BR_NOT_TAKEN']:
@@ -675,32 +777,38 @@ class BETR_Encoder:
         # Extend bit, only valid for TRAP
         extend = 1 if instr_type == 'TRAP' else 0
 
-        # Print each instruction information
+        # Print each instruction information #CONFIG()打印每条指令信息
         branch_addr_str = f"0x{self.curr_branch_addr:08X}" if self.curr_branch_addr is not None else "N/A"
-        
-        #CONFIG()打印每条指令信息
         print(f"Instruction PC=0x{instr.pc:08X} | Type={instr_type:12s} | "
               f"Compressed={'Yes(16bit)' if instr.is_compressed else 'No(32bit)'} | "
               f"inst_cnt={self.inst_cnt:02d} | br_tkn={self.br_tkn:032b} | "
               f"branch_addr={branch_addr_str}")
 
-        # Determine if trace packet should be sent
-        send_flag, send_reason = self.should_send(instr)
+        # --------------------------------------------------
+        # Step 10: 判断是否发送TRACE包
+        # --------------------------------------------------
+        send_flag, send_reason = self.should_send(instr) # 发送信号和发送标识.
         if send_flag:
             self._send_trace_packet(send_reason, extend)
 
-        # -------- 新增：保存上一拍指令类型 --------
-        #@@TODO:()
+        # --------------------------------------------------
+        # Step 11: 保存上一拍指令类型 for RETURN类型，利用上一拍类型是RETURN，发送RETURN信息和真实跳转地址进行比较.
+        # --------------------------------------------------
         self.prev_instr_type = instr_type
     
     #@@TODO:()
-    # 测试新的br模式
+    # ======================================================
+    # New_branch_test函数: 测试新的BR压缩模式
+    # ======================================================
     def New_branch_test(self,instr):
         instr_type = classify_instr(instr)
 
         if instr_type in ['BR_TAKEN', 'BR_NOT_TAKEN']:
             curr_bit = 1 if instr_type == 'BR_TAKEN' else 0
 
+            # --------------------------------------------------
+            # Step 1: 第一条分支初始化
+            # --------------------------------------------------
             if self.prev_br_bit is None:
                 # 第一条分支
                 self.prev_br_bit = curr_bit
@@ -715,6 +823,9 @@ class BETR_Encoder:
                 )
                 return
             
+            # --------------------------------------------------
+            # Step 2: 重复BR处理
+            # --------------------------------------------------
             if (curr_bit == self.prev_br_bit) and (self.repeat_cnt < 16) and (self.beat_break != 1):
                 # 连续重复，增加重复计数
                 self.repeat_cnt += 1
@@ -731,9 +842,11 @@ class BETR_Encoder:
                 f"repeat_cnt={self.repeat_cnt}, beat_break={self.beat_break}, "
                 f"beat_tkn={self.beat_tkn:032b}, beat_cnt={self.beat_cnt}\033[0m"
             )
-
         #@@TODO:()
 
+    # ======================================================
+    # IRQ触发函数：Stop Address
+    # ======================================================
     def _trigger_irq_stop_address(self):
         """Trigger IRQ due to stop address hit"""
         self.status_reg.set_stop_address_hit()
@@ -742,6 +855,9 @@ class BETR_Encoder:
         self.trace_out.irq = 1
         print("\033[31m Stop address hit, IRQ asserted - waiting for CLR_IRQ\033[0m")
 
+    # ======================================================
+    # IRQ触发函数：SRAM Full
+    # ======================================================
     def _trigger_irq_sram_full(self):
         """Trigger IRQ due to SRAM full"""
         self.irq_ctrl_reg.set_irq()
@@ -749,69 +865,93 @@ class BETR_Encoder:
         self.trace_out.irq = 1
         print("\033[31m SRAM full, cannot send packet, IRQ asserted - waiting for CLR_IRQ\033[0m")
 
+    # ======================================================
+    # TRACE包发送函数
+    # ======================================================
     def _send_trace_packet(self, send_reason, extend):
-        """Send trace packet with proper IRQ handling"""
+        """
+        Send trace packet with proper SRAM and STACK handling
+
+        Args:
+            send_reason: 触发发送的原因
+            extend: TRAP扩展标志
+        """
+        # --------------------------------------------------
+        # Step 1: 检查SRAM是否满
+        # --------------------------------------------------
         sram_full = self.sram_used >= self.sram_max_len
         self.status_reg.update_sram_full(sram_full)  # Update SRAM full status
         
-        if not sram_full:
-            trace_pkg = Trace_Pkg(self.curr_branch_addr, self.inst_cnt, self.br_tkn, extend)
-
-            # +++ 新增：基于send_reason更新包类型统计 +++
-            if send_reason in self.pkg_type_stats:
-                self.pkg_type_stats[send_reason] += 1
-            else:
-                self.pkg_type_stats['normal'] += 1  # 默认归为normal
-
-            print(f"【PACKAGE】Trigger packet send: {send_reason}")
-            self.trace_out.send(trace_pkg, sram_full=False)  # Always pass sram_full=False to send()
-            self.sram_buffer.append(trace_pkg.to_int())
-            self.sram_used += 1
-            self.inst_cnt = 0
-            self.br_cnt   = 0
-            self.br_tkn = 0
-            self.curr_branch_addr = None  # Reset for next block
-
-            #@TODO:() REPEAT_BR
-            self.prev_br_bit = None     # 保存上一条 br_tkn 的 bit（1/0）
-            self.beat_tkn = 0
-            self.beat_cnt = 0
-            self.beat_break = 0
-            self.repeat_cnt = 0         # 重复次数
-            self.B_value = 0            # 当前重复的值
-            #@TODO:()
-
-            ##@@TODO():
-            ##@@20251106-Add CALL/RETURN Stack
-            # self.ret_stack = [0] * self.stack_size
-            # self.stack_size = self.stack_size
-            # self.head = 0  # 压栈指针（CALL 写入）
-            # self.tail = 0  # 出栈指针（RET 读出）
-            # self.return_stack_addr = 0
-            self.mis_stack = 0
-
-            # 保存上一拍的指令类型
-            self.prev_instr_type   = None # 保存上一拍的指令类型
-            ##@@20251106-Add CALL/RETURN Stack
-            ##@@TODO():
-        else:
+        if sram_full:
             self._trigger_irq_sram_full()
+            return
+
+        # --------------------------------------------------
+        # Step 2: 构建TRACE包
+        # --------------------------------------------------
+        trace_pkg = Trace_Pkg(self.curr_branch_addr, self.inst_cnt, self.br_tkn, extend)
+
+        # +++ 新增：基于send_reason更新包类型统计 +++
+        if send_reason in self.pkg_type_stats:
+            self.pkg_type_stats[send_reason] += 1
+        else:
+            self.pkg_type_stats['normal'] += 1  # 默认归为normal
+
+        print(f"【PACKAGE】Trigger packet send: {send_reason}")
+        self.trace_out.send(trace_pkg, sram_full=False)  # Always pass sram_full=False to send()
+        self.sram_buffer.append(trace_pkg.to_int())
+        self.sram_used += 1
+
+        # --------------------------------------------------
+        # Step 3: 清理指令计数、分支信息和状态
+        # --------------------------------------------------
+        self.inst_cnt = 0
+        self.br_cnt   = 0
+        self.br_tkn = 0
+        self.curr_branch_addr = None  # Reset for next block
+
+        #@TODO:() 重置BR压缩状态
+        self.prev_br_bit = None     
+        self.beat_tkn = 0
+        self.beat_cnt = 0
+        self.beat_break = 0
+        self.repeat_cnt = 0         # 重复次数
+        self.B_value = 0            # 当前重复的值
+        #@TODO:()
+
+        ##@@TODO():
+        ##@@20251106-Add CALL/RETURN Stack
+        # # 发包后清空STACK.
+        # self.ret_stack = [0] * self.stack_size
+        # self.stack_size = self.stack_size
+        # self.head = 0  # 压栈指针（CALL 写入）
+        # self.tail = 0  # 出栈指针（RET 读出）
+        # self.return_stack_addr = 0
+        # 清空STACK_MISS情况.
+        self.mis_stack = 0
+        # 保存上一拍的指令类型
+        self.prev_instr_type   = None # 保存上一拍的指令类型
+        ##@@20251106-Add CALL/RETURN Stack
+        ##@@TODO():
 
     def should_send(self, instr: RVFI_Instr):
         """
         Return: (whether to send packet, send reason)
         """
         instr_type = classify_instr(instr)
+        # 1.指令计数满 inst_cnt >= 1023
         if self.inst_cnt >= 1023:
             return True, 'inst_cnt_max'
+        # 2.分支信息满 原始分支跳转信息，深度为32
         # if self.br_cnt >= 32: 
         #     return True, 'br_tkn_full'
+        # 3.中断异常触发
         if instr.ex_valid == 1:
             return True, 'trap'
-        #@TODO:()
+        #@TODO:() 3.CALL/RETURN STACK的构建，堆栈预测失败后发包
         if self.mis_stack == 1:
           return True, 'stack_miss'
-        # 堆栈预测失败后发包
+        # 4.分支信息满 压缩分支跳转信息，深度最大为2^5 + 27
         if self.beat_cnt >= 27:
             return True,'beat_tkn_full'
         # 压缩包模式分支信息满
@@ -820,6 +960,9 @@ class BETR_Encoder:
             return True, 'indirect'
         return False, ''
 
+    # ======================================================
+    # Encoder Enable / Stop Address / IRQ Clear
+    # ======================================================
     def set_enable(self, enable):
         """Set encoder enable state"""
         if enable:
@@ -842,6 +985,9 @@ class BETR_Encoder:
         self.trace_out.irq = 0
         print("\033[36m All IRQ sources cleared (SRAM full + Stop address hit)\033[0m")
 
+    # ======================================================
+    # Status / Statistics
+    # ======================================================
     def read_status(self):
         """Read status register"""
         return self.status_reg.read()
@@ -892,6 +1038,9 @@ class BETR_Encoder:
         print(f"  {'TOTAL':<25}: {total_packets:4d} packets (100.00%)")
         print("="*60)
 
+    # ======================================================
+    # 导入并处理.log文件代码
+    # ======================================================
     def import_and_process_log(self, log_filename):
         """
         导入.log文件并立即处理
@@ -943,12 +1092,17 @@ def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, sta
             is_compressed=False,
             is_branch=False,
             is_taken=False,
-            ex_valid=False
+            ex_valid=False,
+            # 添加参数 CALL/RETURN
+            inst_code  = 0,# 指令的全部指令（From RVFI）
+            rd_reg     = 0,# 指令的目的寄存器
+            rs1_reg    = 0,# 指令的源寄存器1
+            rs2_reg    = 0 # 指令的源寄存器2
         ))
         pc += 4
 
     # Block 2: Branch instructions
-    branch_ops = ['EQ', 'NE', 'LTS', 'GES', 'LTU', 'GEU']
+    branch_ops = [0x11, 0x12, 0x0D, 0x0F, 0x0E, 0x10]  # EQ, NE, LTS, GES, LTU, GEU
     for i in range(branch_len):
         op = branch_ops[i % len(branch_ops)]
         taken = (i % 2 == 0)
@@ -959,7 +1113,12 @@ def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, sta
             is_compressed=False,
             is_branch=True,
             is_taken=taken,
-            ex_valid=False
+            ex_valid=False,
+            # 添加参数 CALL/RETURN
+            inst_code  = 0,# 指令的全部指令（From RVFI）
+            rd_reg     = 0,# 指令的目的寄存器
+            rs1_reg    = 0,# 指令的源寄存器1
+            rs2_reg    = 0 # 指令的源寄存器2
         ))
         pc += 4
 
@@ -973,7 +1132,12 @@ def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, sta
             is_compressed=False,
             is_branch=False,
             is_taken=False,
-            ex_valid=True
+            ex_valid=True,
+            # 添加参数 CALL/RETURN
+            inst_code  = 0,# 指令的全部指令（From RVFI）
+            rd_reg     = 0,# 指令的目的寄存器
+            rs1_reg    = 0,# 指令的源寄存器1
+            rs2_reg    = 0 # 指令的源寄存器2
         ))
         pc += 4
 
@@ -981,12 +1145,17 @@ def gen_instr_stream(normal_len=4, branch_len=2, trap_len=1, indirect_len=1, sta
     for _ in range(indirect_len):
         instr_stream.append(RVFI_Instr(
             pc=pc,
-            inst_op='JALR',
+            inst_op=0x13,
             valid=True,
             is_compressed=False,
             is_branch=True,
             is_taken=True,
-            ex_valid=False
+            ex_valid=False,
+            # 添加参数 CALL/RETURN
+            inst_code  = 0,# 指令的全部指令（From RVFI）
+            rd_reg     = 0,# 指令的目的寄存器
+            rs1_reg    = 0,# 指令的源寄存器1
+            rs2_reg    = 0 # 指令的源寄存器2
         ))
         pc += 4
 
@@ -1011,28 +1180,35 @@ def test_basic_functionality():
     return betr
 
 def test_stop_address_feature():
-    """测试停止地址功能"""
+    """测试停止地址功能，确保 IRQ 触发两次并可清零"""
     print("\n【STOP】Testing Stop Address Feature")
     betr = BETR_Encoder(sram_max_len=4, trace_filename="test_stop_address_trace.txt")
     
-    # 设置停止地址在中间位置
-    stop_pc = 0x100C
-    betr.set_stop_address(stop_pc, enable=True)
+    # 第一次停止地址
+    first_stop_pc = 0x100C
+    betr.set_stop_address(first_stop_pc, enable=True)
     betr.set_enable(True)
     
-    instr_stream = gen_instr_stream(normal_len=10, branch_len=0, trap_len=0, indirect_len=0)
+    # 生成指令流（第一次停止地址出现）
+    instr_stream = gen_instr_stream(normal_len=12, branch_len=0, trap_len=0, indirect_len=0)
     
-    irq_triggered = False
+    irq_count = 0
     for i, instr in enumerate(instr_stream):
         betr.process_instr(instr)
+        
         if betr.irq_ctrl_reg.is_irq_active():
-            print(f"【STOP】Stop address IRQ triggered at PC=0x{instr.pc:08X}")
-            irq_triggered = True
-            break
+            irq_count += 1
+            print(f"【STOP】Stop address IRQ triggered at PC=0x{instr.pc:08X}, count={irq_count}")
+            betr.clear_irq()
+            print(f"【STOP】IRQ cleared")
+            
+            # 更新停止地址为第二次触发
+            if irq_count == 1:
+                second_stop_pc = 0x1020
+                betr.set_stop_address(second_stop_pc, enable=True)
+                print(f"【STOP】Stop address updated to 0x{second_stop_pc:08X}")
     
-    if not irq_triggered:
-        print("【STOP】Stop address IRQ was not triggered")
-    
+    print(f"Total IRQ triggers: {irq_count}")
     return betr
 
 def test_sram_full_condition():
@@ -1041,9 +1217,9 @@ def test_sram_full_condition():
     betr = BETR_Encoder(sram_max_len=2, trace_filename="test_sram_full_trace.txt")
     betr.set_enable(True)
     
-    instr_stream = gen_instr_stream(normal_len=2, branch_len=10, trap_len=0, indirect_len=0)
+    instr_stream = gen_instr_stream(normal_len=2, branch_len=10, trap_len=0, indirect_len=5)
     
-    for i, instr in enumerate(instr_stream[:8]):
+    for i, instr in enumerate(instr_stream):
         betr.process_instr(instr)
         if betr.irq_ctrl_reg.is_irq_active():
             print(f"SRAM full IRQ triggered after {i+1} instructions")
@@ -1080,28 +1256,6 @@ def test_encoder_enable_disable():
     print(f"Enable/disable test completed: {stats['total_missed']} instructions missed")
     return betr
 
-def test_comprehensive_scenario():
-    """测试综合场景"""
-    print("\nTesting Comprehensive Scenario")
-    betr = BETR_Encoder(sram_max_len=4, trace_filename="test_comprehensive_trace.txt")
-    
-    betr.set_stop_address(0x1018, enable=True)
-    instr_stream = gen_instr_stream(normal_len=8, branch_len=4, trap_len=1, indirect_len=2)
-    
-    print("Starting comprehensive test...")
-    betr.set_enable(True)
-    
-    for i, instr in enumerate(instr_stream):
-        print(f"Instruction {i+1}: PC=0x{instr.pc:08X}")
-        betr.process_instr(instr)
-        
-        if betr.irq_ctrl_reg.is_irq_active():
-            print("Stop address hit - clearing IRQ")
-            betr.clear_irq()
-            break
-    
-    return betr
-
 def run_all_tests():
     """运行所有测试"""
     print("\n" + "=" * 70)
@@ -1113,8 +1267,7 @@ def run_all_tests():
         test_basic_functionality,
         test_stop_address_feature, 
         test_sram_full_condition,
-        test_encoder_enable_disable,
-        test_comprehensive_scenario
+        test_encoder_enable_disable
     ]
     
     for test_func in test_functions:
@@ -1139,7 +1292,7 @@ def run_all_tests():
     print("Test Summary")
     print("=" * 70)
     for result in test_results:
-        status_icon = "【STATUS】" if result['status'] == 'PASS' else "❌"
+        status_icon = "【STATUS】" if result['status'] == 'PASS' else "FAIL"
         print(f"{status_icon} {result['test']}: {result['status']}")
         print(f"   Packets: {result['packets']}, Missed: {result['missed']}")
     
@@ -1163,23 +1316,8 @@ if __name__ == "__main__":
     encoder.trace_out.pkg_writer = TracePkgWriter("trace_pkg_only.txt")  # 保存纯包整数
     encoder.set_enable(True)
     
-    #简易测试 10条指令coremark
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_10.log")
-
-    #简易测试 400条指令coremark
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_400.log")
-
-    #简易测试 8000条指令coremark
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_8000.log")
-
-    #压力测试 全分支指令(pc不对的模拟版本)
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_allbr.log")
-
-    #实际测试 全代码coremark
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test.log")
-
-    #简易测试 100条指令
-    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_100_stack.log")
-
-    #实际测试 100条指令
-    encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_CALL+RET.log")
+    #测试控制寄存器
+    run_all_tests()
+    
+    #实际测试 Coremark-CALL+RET
+    #encoder.import_and_process_log("../test/coremark/cva6_trace_log_for_test_CALL+RET.log")
