@@ -1,0 +1,1 @@
+trace_valid:1, branch_addr:0x00001000, inst_cnt:16, br_tkn:0b00000000000000000000000000000010, extend:0
